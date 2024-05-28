@@ -5,10 +5,9 @@ import logging
 import time
 from datetime import datetime
 
-
+# Setup logging
 logging.basicConfig(filename='trading_bot.log', level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 api_key = 'api_key'
 api_secret = 'api_secret'
@@ -22,15 +21,34 @@ binance = ccxt.binance({
     }
 })
 
+symbols = ['BTC/USDT', 'ETH/USDT']
 
-symbols = ['SHIB/USDT', 'DOGE/USDT', 'TRX/USDT']
-
-def calculate_atr(symbol, timeframe='1h', period=14):
-    ohlcv = binance.fetch_ohlcv(symbol, timeframe)
+def fetch_ohlcv(symbol, timeframe='1h', limit=100):
+    ohlcv = binance.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
+
+def calculate_atr(df, period=14):
     df['atr'] = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period).average_true_range()
     return df['atr'].iloc[-1]
 
+def calculate_bollinger_bands(df, period=20, std_dev=2):
+    indicator_bb = ta.volatility.BollingerBands(close=df['close'], window=period, window_dev=std_dev)
+    df['bb_middle'] = indicator_bb.bollinger_mavg()
+    df['bb_upper'] = indicator_bb.bollinger_hband()
+    df['bb_lower'] = indicator_bb.bollinger_lband()
+
+def calculate_ema(df, period=14):
+    df['ema'] = ta.trend.EMAIndicator(close=df['close'], window=period).ema_indicator()
+
+def decide_strategy(df):
+    if df['close'].iloc[-1] < df['bb_lower'].iloc[-1]:
+        return 'mean_reversion'
+    elif df['close'].iloc[-1] > df['ema'].iloc[-1]:
+        return 'momentum'
+    else:
+        return 'none'
 
 def fetch_market_data(symbols):
     market_data = {}
@@ -62,7 +80,7 @@ def manage_orders(symbols):
             open_orders = binance.fetch_open_orders(symbol)
             for order in open_orders:
                 current_price = binance.fetch_ticker(symbol)['last']
-                if order['side'] == 'buy' and order['price'] < current_price * 0.98:  # Price significantly away
+                if order['side'] == 'buy' and order['price'] < current_price * 0.98:  
                     binance.cancel_order(order['id'], symbol)
                     logging.info(f"Cancelled order {order['id']} for {symbol} due to significant price deviation")
     except Exception as e:
@@ -70,8 +88,9 @@ def manage_orders(symbols):
 
 def calculate_position_size(symbol, balance, risk_percentage=0.01):
     try:
-        atr = calculate_atr(symbol)
-        price = binance.fetch_ticker(symbol)['last']
+        df = fetch_ohlcv(symbol)
+        atr = calculate_atr(df)
+        price = df['close'].iloc[-1]
         position_size = (balance * risk_percentage) / atr
         amount = position_size / price
         logging.info(f"Calculated position size for {symbol}: {amount} based on ATR and risk percentage")
@@ -149,7 +168,6 @@ def apply_risk_management(symbol, entry_orders, stop_loss_pct=0.01, take_profit_
     except Exception as e:
         logging.error(f"Error applying risk management: {e}")
 
-
 def trading_loop():
     while True:
         try:
@@ -157,14 +175,26 @@ def trading_loop():
             manage_orders(symbols)  
             for symbol in symbols:
                 base_asset, quote_asset = symbol.split('/')
+                df = fetch_ohlcv(symbol)
+                calculate_bollinger_bands(df)
+                calculate_ema(df)
+                
+                strategy = decide_strategy(df)
+                logging.info(f"Selected strategy for {symbol}: {strategy}")
+                
                 base_price = market_data[symbol]['last']
                 quote_balance = get_balance(quote_asset)
                 
-                if quote_balance > 1:  
+                if quote_balance > 1 and strategy != 'none':  
                     amount = calculate_position_size(symbol, quote_balance)
                     if amount > 0:
-                        buy_price = base_price * 0.995  
-                        sell_price = base_price * 1.005  
+                        if strategy == 'mean_reversion':
+                            buy_price = df['bb_lower'].iloc[-1]
+                            sell_price = df['bb_upper'].iloc[-1]
+                        elif strategy == 'momentum':
+                            buy_price = base_price * 0.995
+                            sell_price = base_price * 1.005
+                        
                         entry_orders = smart_order_routing(symbol, 'buy', amount, buy_price)  
                         if entry_orders:
                             apply_risk_management(symbol, entry_orders)
