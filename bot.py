@@ -9,8 +9,9 @@ from datetime import datetime
 logging.basicConfig(filename='trading_bot.log', level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-api_key = 'api_key'
-api_secret = 'api_secret'
+# Binance API configuration
+api_key = 'your_api_key'
+api_secret = 'your_api_secret'
 
 binance = ccxt.binance({
     'apiKey': api_key,
@@ -22,6 +23,7 @@ binance = ccxt.binance({
 })
 
 symbols = ['BTC/USDT', 'ETH/USDT']
+min_notional = 10  
 
 def fetch_ohlcv(symbol, timeframe='1h', limit=100):
     ohlcv = binance.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -93,6 +95,9 @@ def calculate_position_size(symbol, balance, risk_percentage=0.01):
         price = df['close'].iloc[-1]
         position_size = (balance * risk_percentage) / atr
         amount = position_size / price
+        
+        if amount * price < min_notional:
+            amount = min_notional / price
         logging.info(f"Calculated position size for {symbol}: {amount} based on ATR and risk percentage")
         return amount
     except Exception as e:
